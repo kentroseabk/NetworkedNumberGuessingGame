@@ -1,27 +1,29 @@
 #include <enet/enet.h>
 #include <iostream>
 #include <chrono>
+#include <thread>
 #include <map>
+#include "GamePacket.h"
 
 using namespace std;
 
 ENetAddress address;
 ENetHost* server;
 
-const int fakeMessageTime = 5;
-int lastFakeMessage = 0;
-
-const int fakeMessagesSize = 5;
-string fakeMessages[fakeMessagesSize] = { "Just who do you think you are?",
-                                        "It's time for you to leave.",
-                                        "ITS OVER 9000",
-                                        "Do you really think you should have said that?",
-                                        "How about no?" };
-
 map<ENetPeer*, string> peerToNameMap;
 
-const char messageTypeMessage = 'm';
-const char messageTypeConnect = 'c';
+const int maxNumber = 100;
+int numberToGuess = 0;
+
+const int requiredNumberOfPlayersToBegin = 2;
+
+bool gameStarted = false;
+
+int currentActivePlayer = 0;
+
+bool waitingOnPeer = false;
+
+int timeToWaitForNextGame = 5000;
 
 bool CreateServer()
 {
@@ -42,39 +44,6 @@ bool CreateServer()
     return server != NULL;
 }
 
-string GetUserNameFromPeer(ENetPeer* peer)
-{
-    auto iterator = peerToNameMap.find(peer);
-
-    if (iterator != peerToNameMap.end())
-    {
-        return peerToNameMap.at(peer);
-    }
-
-    return nullptr;
-}
-
-uint32_t GetTime()
-{
-    using namespace std::chrono;
-    return static_cast<uint32_t>(duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
-}
-
-void SendMessage(string message)
-{
-    /* Create a reliable packet of size 7 containing "packet\0" */
-    ENetPacket* packet = enet_packet_create(message.c_str(),
-        strlen(message.c_str()) + 1,
-        ENET_PACKET_FLAG_RELIABLE);
-
-    /* Send the packet to the peer over channel id 0. */
-    /* One could also broadcast the packet by         */
-    enet_host_broadcast(server, 0, packet);
-
-    /* One could just use enet_host_service() instead. */
-    enet_host_flush(server);
-}
-
 int GetNumberOfConnections()
 {
     int total = 0;
@@ -88,72 +57,232 @@ int GetNumberOfConnections()
     return total;
 }
 
-void CheckIfShouldSendFakeMessage()
+string GetUserNameFromPeer(ENetPeer* peer)
 {
-    int numberOfConnections = GetNumberOfConnections();
+    auto iterator = peerToNameMap.find(peer);
 
-    int currentTime = GetTime();
-    if (numberOfConnections > 1 && currentTime > lastFakeMessage + fakeMessageTime)
+    if (iterator != peerToNameMap.end())
     {
-        int randomUserNameIndex = rand() % numberOfConnections;
+        return peerToNameMap.at(peer);
+    }
 
-        string userName = "";
+    return nullptr;
+}
 
-        int i = 0;
+void BroadcastMessage(string message)
+{
+    MessageGamePacket messageGP;
+    messageGP.message = message;
 
-        for (auto iterator = peerToNameMap.begin(); iterator != peerToNameMap.end(); ++iterator)
+    size_t dataSize = messageGP.size();
+    char* data = new char[dataSize];
+
+    MessageGamePacket::serialize(messageGP, data);
+
+    /* Create a reliable packet of size 7 containing "packet\0" */
+    ENetPacket* packet = enet_packet_create(data,
+        dataSize,
+        ENET_PACKET_FLAG_RELIABLE);
+
+    /* Send the packet to the peer over channel id 0. */
+    /* One could also broadcast the packet by         */
+    enet_host_broadcast(server, 0, packet);
+
+    /* One could just use enet_host_service() instead. */
+    enet_host_flush(server);
+}
+
+int GetRandomNumber(int max)
+{
+    /* initialize random seed: */
+    srand(time(NULL));
+
+    /* generate secret number between 1 and max: */
+    return rand() % max + 1;
+}
+
+ENetPeer* GetActivePeer()
+{
+    int i = 0;
+
+    int activePeers = GetNumberOfConnections();
+
+    while (i < activePeers)
+    {
+        if (server->peers[i].state == ENET_PEER_STATE_CONNECTED)
         {
-            if (i == randomUserNameIndex)
+            if (i == currentActivePlayer)
             {
-                userName = iterator->second;
-                break;
+                return &server->peers[i];
             }
 
             i++;
         }
+    }
 
-        // send fake message
-        SendMessage(userName + ": " + fakeMessages[rand() % fakeMessagesSize]);
-        lastFakeMessage = currentTime;
+    return nullptr;
+}
+
+void SendTurnToActivePeer(ENetPeer* activePeer)
+{
+    // broadcast getting input from certain player
+    BroadcastMessage("System Message: It is now " + GetUserNameFromPeer(activePeer) + "'s turn.");
+
+    waitingOnPeer = true;
+
+    // send to player it's their turn
+    UserGuessGamePacket userGuessGP;
+    userGuessGP.number = maxNumber;
+
+    size_t dataSize = userGuessGP.size();
+    char* data = new char[dataSize];
+
+    UserGuessGamePacket::serialize(userGuessGP, data);
+
+    /* Create a reliable packet of size 7 containing "packet\0" */
+    ENetPacket* packet = enet_packet_create(data,
+        dataSize,
+        ENET_PACKET_FLAG_RELIABLE);
+
+    /* Send the packet to the peer over channel id 0. */
+    /* One could also broadcast the packet by         */
+    enet_peer_send(activePeer, 0, packet);
+
+    /* One could just use enet_host_service() instead. */
+    enet_host_flush(server);
+}
+
+void BeginGame()
+{
+    numberToGuess = GetRandomNumber(maxNumber);
+
+    cout << "Number to guess: " << numberToGuess << endl;
+
+    BroadcastMessage("System Message: Starting game. (" + to_string(GetNumberOfConnections()) + " / " + to_string(requiredNumberOfPlayersToBegin) + ")");
+
+    SendTurnToActivePeer(GetActivePeer());
+
+    gameStarted = true;
+}
+
+void MoveToNextPlayer()
+{
+    currentActivePlayer = (currentActivePlayer + 1) % GetNumberOfConnections();
+}
+
+uint32_t GetTime()
+{
+    using namespace std::chrono;
+    return static_cast<uint32_t>(duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
+}
+
+void CheckIfCanStartGame(int numberOfConnections)
+{
+    bool canStart = numberOfConnections >= requiredNumberOfPlayersToBegin;
+
+    if (canStart)
+    {
+        BeginGame();
+    }
+    else
+    {
+        BroadcastMessage("System Message: Waiting for more players. (" + to_string(GetNumberOfConnections()) + "/" + to_string(requiredNumberOfPlayersToBegin) + ")");
     }
 }
 
-void HandleEventTypeReceive(ENetEvent event)
+void EndGame()
 {
-    string eventPacketData = (char*)event.packet->data;
+    cout << "Game is over.";
+    gameStarted = false;
+    currentActivePlayer = 0;
+    numberToGuess = 0;
+    waitingOnPeer = false;
 
-    char messageType = eventPacketData[0];
-    string restOfMessage = eventPacketData.substr(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(timeToWaitForNextGame));
 
-    if (messageType == messageTypeConnect)
+    CheckIfCanStartGame(GetNumberOfConnections());
+}
+
+bool CheckIfGameOver(int guess)
+{
+    return guess == numberToGuess;
+}
+
+void HandleEventTypeReceiveGamePacket(ENetEvent event)
+{
+    GamePacket* gamePacket = (GamePacket*)event.packet->data;
+
+    if (gamePacket)
     {
-        auto iterator = peerToNameMap.find(event.peer);
-
-        if (iterator == peerToNameMap.end())
+        if (gamePacket->type == PHT_UserInfo)
         {
-            peerToNameMap.insert(pair<ENetPeer*, string>(event.peer, restOfMessage));
+            UserInfoGamePacket userInfoGP;
+            UserInfoGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userInfoGP);
 
-            SendMessage(restOfMessage + " has entered the chat.");
+            // save user and connectID
+            auto iterator = peerToNameMap.find(event.peer);
+
+            if (iterator == peerToNameMap.end())
+            {
+                peerToNameMap.insert(pair<ENetPeer*, string>(event.peer, userInfoGP.username));
+
+                BroadcastMessage("System Message: " + userInfoGP.username + " has joined the game.");
+            }
+
+            if (!gameStarted)
+            {
+                CheckIfCanStartGame(GetNumberOfConnections());
+            }
         }
-    }
-    else if (messageType == messageTypeMessage)
-    {
-        SendMessage(GetUserNameFromPeer(event.peer) + ": " + restOfMessage);
+        else if (gamePacket->type == PHT_UserGuess)
+        {
+            UserGuessGamePacket userGuessGP;
+            UserGuessGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userGuessGP);
+
+            ENetPeer* activePeer = GetActivePeer();
+            if (activePeer != nullptr && event.peer == activePeer)
+            {
+                if (CheckIfGameOver(userGuessGP.number))
+                {
+                    BroadcastMessage("System Message: Correct number guessed (" + to_string(userGuessGP.number) + 
+                        ") by " + GetUserNameFromPeer(activePeer) + ". They are the winner!");
+
+                    EndGame();
+                }
+                else
+                {
+                    BroadcastMessage("System Message: Incorrect number guessed (" + to_string(userGuessGP.number) +
+                        ") by " + GetUserNameFromPeer(activePeer) + ".");
+
+                    MoveToNextPlayer();
+                    ENetPeer* nowActivePeer = GetActivePeer();
+                    SendTurnToActivePeer(nowActivePeer);
+                }
+
+                waitingOnPeer = false;
+            }
+        }
     }
 }
 
 void HandleEventTypeDisconnect(ENetEvent event)
 {
+    int numberOfActiveConnections = GetNumberOfConnections();
+
     cout << "System: A peer has disconnected. Connections: "
-        << GetNumberOfConnections() << endl;
+        << numberOfActiveConnections << endl;
 
     auto iterator = peerToNameMap.find(event.peer);
 
     if (iterator != peerToNameMap.end())
     {
-        SendMessage(GetUserNameFromPeer(event.peer) + " has left the chat.");
-
+        BroadcastMessage("System Message: " + GetUserNameFromPeer(event.peer) + " has left the game.");
         peerToNameMap.erase(iterator);
+    }
+
+    if (numberOfActiveConnections == 0)
+    {
+        EndGame();
     }
 }
 
@@ -191,13 +320,17 @@ int main(int argc, char** argv)
             switch (event.type)
             {
             case ENET_EVENT_TYPE_CONNECT:
+            {
+                int numberOfConnections = GetNumberOfConnections();
+
                 cout << "System: A new peer has connected. Connections: "
-                    << GetNumberOfConnections() << endl;
+                    << numberOfConnections << endl;
 
                 break;
+            }
             case ENET_EVENT_TYPE_RECEIVE:
             {
-                HandleEventTypeReceive(event);
+                HandleEventTypeReceiveGamePacket(event);
 
                 /* Clean up the packet now that we're done using it. */
                 enet_packet_destroy(event.packet);
@@ -207,12 +340,21 @@ int main(int argc, char** argv)
             case ENET_EVENT_TYPE_DISCONNECT:
                 HandleEventTypeDisconnect(event);
 
+                ENetPeer* activePeer = GetActivePeer();
+
+                if (activePeer && event.peer == activePeer)
+                {
+                    cout << "Active peer left.. " << GetUserNameFromPeer(activePeer) << endl;
+                    MoveToNextPlayer();
+                    ENetPeer* nowActivePeer = GetActivePeer();
+                    cout << "New active peer... " << GetUserNameFromPeer(nowActivePeer) << endl;
+                    SendTurnToActivePeer(nowActivePeer);
+                }
+
                 /* Reset the peer's client information. */
                 event.peer->data = NULL;
             }
         }
-
-        CheckIfShouldSendFakeMessage();
     }
 
     if (server != NULL) enet_host_destroy(server);

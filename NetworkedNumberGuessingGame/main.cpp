@@ -1,8 +1,10 @@
+#define NOMINMAX
 #include <enet/enet.h>
 #include <iostream>
 #include <conio.h>
 #include <thread>
 #include <string>
+#include "GamePacket.h"
 
 using namespace std;
 
@@ -10,19 +12,8 @@ ENetAddress address;
 ENetHost* client;
 ENetPeer* peer;
 
-string name;
-string chatPrompt;
-
-const char messageTypeMessage = 'm';
-const char messageTypeConnect = 'c';
-
-thread inputThread;
-
-bool disconnect = false;
-
-string messageBuffer = "";
-
-bool redisplayInput = false;
+string username;
+bool disconnect;
 
 bool CreateClient()
 {
@@ -36,11 +27,53 @@ bool CreateClient()
     return client != NULL;
 }
 
-void SendMessage(string message)
+void HandleInvalidInput()
 {
+    cout << "Invalid input" << endl;
+    cin.clear();
+    cin.ignore(numeric_limits<streamsize>::max(), '\n');
+}
+
+int GetValidInput(int max)
+{
+    int selection;
+
+    bool retry;
+
+    do
+    {
+        retry = false;
+
+        cin >> selection;
+
+        if (cin.fail() || selection < 1 || selection > max)
+        {
+            HandleInvalidInput();
+
+            retry = true;
+        }
+    } while (retry);
+
+    cout << endl;
+
+    return selection;
+}
+
+void SendUserInfoGamePacket()
+{
+    UserInfoGamePacket userInfoGP;
+    userInfoGP.username = username;
+
+    // Create a character buffer as long as the game packet size (function defined on the struct)
+    size_t dataSize = userInfoGP.size();
+    char* data = new char[dataSize];
+
+    // Pack message struct into character buffer
+    UserInfoGamePacket::serialize(userInfoGP, data);
+
     /* Create a reliable packet of size 7 containing "packet\0" */
-    ENetPacket* packet = enet_packet_create(message.c_str(),
-        strlen(message.c_str()) + 1,
+    ENetPacket* packet = enet_packet_create(data,
+        dataSize,
         ENET_PACKET_FLAG_RELIABLE);
 
     /* Send the packet to the peer over channel id 0. */
@@ -51,7 +84,61 @@ void SendMessage(string message)
     enet_host_flush(client);
 }
 
-void LeaveChat()
+void SendUserGuessGamePacket(int number)
+{
+    UserGuessGamePacket userGuessGP;
+    userGuessGP.number = number;
+
+    // Create a character buffer as long as the game packet size (function defined on the struct)
+    size_t dataSize = userGuessGP.size();
+    char* data = new char[dataSize];
+
+    // Pack message struct into character buffer
+    UserGuessGamePacket::serialize(userGuessGP, data);
+
+    /* Create a reliable packet of size 7 containing "packet\0" */
+    ENetPacket* packet = enet_packet_create(data,
+        dataSize,
+        ENET_PACKET_FLAG_RELIABLE);
+
+    /* Send the packet to the peer over channel id 0. */
+    /* One could also broadcast the packet by         */
+    enet_host_broadcast(client, 0, packet);
+
+    /* One could just use enet_host_service() instead. */
+    enet_host_flush(client);
+}
+
+void HandleEventTypeReceiveGamePacket(ENetEvent event)
+{
+    GamePacket* gamePacket = (GamePacket*)event.packet->data;
+
+    if (gamePacket)
+    {
+        if (gamePacket->type == PHT_Message)
+        {
+            MessageGamePacket messageGP;
+            MessageGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, messageGP);
+
+            cout << messageGP.message << endl;
+        }
+        else if (gamePacket->type == PHT_UserGuess)
+        {
+            UserGuessGamePacket userGuessGP;
+            UserGuessGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userGuessGP);
+
+            cout << "Please enter your guess." << endl;
+
+            int guess = GetValidInput(userGuessGP.number);
+
+            cout << "Sending your guess." << endl;
+
+            SendUserGuessGamePacket(guess);
+        }
+    }
+}
+
+void LeaveGame()
 {
     ENetEvent event;
     enet_peer_disconnect(peer, 0);
@@ -77,73 +164,11 @@ void LeaveChat()
     enet_peer_reset(peer);
 }
 
-void ClearInputLine()
-{
-    // clear whatever user has input
-    for (int i = 0; i < chatPrompt.length() + messageBuffer.length(); i++)
-    {
-        cout << '\b';
-        cout << ' ';
-        cout << '\b';
-    }
-}
-
-void ProcessInput()
-{
-    while (!disconnect)
-    {
-        if (redisplayInput)
-        {
-            cout << chatPrompt + messageBuffer;
-            redisplayInput = false;
-        }
-
-        int input = -1;
-
-        if (_kbhit())
-        {
-            input = _getch();
-
-            char charInput = (char)input;
-            if (charInput == '\r')
-            {
-                if (messageBuffer.length() > 0)
-                {
-                    if (messageBuffer == "quit")
-                    {
-                        disconnect = true;
-                    }
-                    else
-                    {
-                        string finalMessage = messageTypeMessage + messageBuffer;
-                        ClearInputLine();
-                        messageBuffer = "";
-
-                        SendMessage(finalMessage);
-                    }
-                }
-            }
-            else if (charInput == '\b')
-            {
-                messageBuffer = messageBuffer.substr(0, messageBuffer.length() - 1);
-                cout << "\b \b";
-            }
-            else
-            {
-                cout << charInput;
-                messageBuffer += charInput;
-            }
-        }
-    }
-}
-
 int main(int argc, char** argv)
 {
     cout << "What is your name?" << endl;
 
-    cin >> name;
-
-    chatPrompt = name + ": ";
+    cin >> username;
 
     cout << endl;
 
@@ -183,11 +208,9 @@ int main(int argc, char** argv)
     if (enet_host_service(client, &event, 5000) > 0 &&
         event.type == ENET_EVENT_TYPE_CONNECT)
     {
-        cout << "Connected to chat." << endl;
+        cout << "Connected to the game." << endl;
 
-        SendMessage(messageTypeConnect + name);
-
-        inputThread = thread(ProcessInput);
+        SendUserInfoGamePacket();
     }
     else
     {
@@ -208,11 +231,7 @@ int main(int argc, char** argv)
             switch (event.type)
             {
             case ENET_EVENT_TYPE_RECEIVE:
-                ClearInputLine();
-
-                cout << (char*)event.packet->data << endl;
-
-                redisplayInput = true;
+                HandleEventTypeReceiveGamePacket(event);
 
                 /* Clean up the packet now that we're done using it. */
                 enet_packet_destroy(event.packet);
@@ -222,8 +241,7 @@ int main(int argc, char** argv)
         }
     }
 
-    LeaveChat();
-    inputThread.join();
+    LeaveGame();
 
     if (client != NULL) enet_host_destroy(client);
 
