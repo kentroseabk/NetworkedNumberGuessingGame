@@ -19,7 +19,7 @@ const int requiredNumberOfPlayersToBegin = 2;
 
 bool gameStarted = false;
 
-int currentActivePlayer = 0;
+ENetPeer* activePeer;
 
 bool waitingOnPeer = false;
 
@@ -101,29 +101,7 @@ int GetRandomNumber(int max)
     return rand() % max + 1;
 }
 
-ENetPeer* GetActivePeer()
-{
-    int i = 0;
-
-    int activePeers = GetNumberOfConnections();
-
-    while (i < activePeers)
-    {
-        if (server->peers[i].state == ENET_PEER_STATE_CONNECTED)
-        {
-            if (i == currentActivePlayer)
-            {
-                return &server->peers[i];
-            }
-
-            i++;
-        }
-    }
-
-    return nullptr;
-}
-
-void SendTurnToActivePeer(ENetPeer* activePeer)
+void SendTurnToActivePeer()
 {
     // broadcast getting input from certain player
     BroadcastMessage("System Message: It is now " + GetUserNameFromPeer(activePeer) + "'s turn.");
@@ -152,22 +130,56 @@ void SendTurnToActivePeer(ENetPeer* activePeer)
     enet_host_flush(server);
 }
 
+ENetPeer* GetNextPeer(ENetPeer* activePeer = nullptr)
+{
+    if (peerToNameMap.size() == 0)
+    {
+        return nullptr;
+    }
+    
+    if (!activePeer)
+    {
+        return peerToNameMap.begin()->first;
+    }
+
+    map<ENetPeer*, string>::iterator it;
+
+    bool passedActivePeer = false;
+
+    for (it = peerToNameMap.begin(); it != peerToNameMap.end(); it++)
+    {
+        if (passedActivePeer)
+        {
+            return it->first;
+        }
+
+        if (it->first == activePeer)
+        {
+            passedActivePeer = true;
+        }
+    }
+
+    return peerToNameMap.begin()->first;
+}
+
+void MoveToNextPlayer()
+{
+    activePeer = GetNextPeer(activePeer);
+}
+
 void BeginGame()
 {
     numberToGuess = GetRandomNumber(maxNumber);
 
     cout << "Number to guess: " << numberToGuess << endl;
 
-    BroadcastMessage("System Message: Starting game. (" + to_string(GetNumberOfConnections()) + " / " + to_string(requiredNumberOfPlayersToBegin) + ")");
+    BroadcastMessage("System Message: Starting new game. (" + to_string(GetNumberOfConnections()) + " / " + to_string(requiredNumberOfPlayersToBegin) + ")");
 
-    SendTurnToActivePeer(GetActivePeer());
+    MoveToNextPlayer();
+
+    SendTurnToActivePeer();
 
     gameStarted = true;
-}
-
-void MoveToNextPlayer()
-{
-    currentActivePlayer = (currentActivePlayer + 1) % GetNumberOfConnections();
 }
 
 uint32_t GetTime()
@@ -194,7 +206,7 @@ void EndGame()
 {
     cout << "Game is over.";
     gameStarted = false;
-    currentActivePlayer = 0;
+    activePeer = nullptr;
     numberToGuess = 0;
     waitingOnPeer = false;
 
@@ -239,7 +251,6 @@ void HandleEventTypeReceiveGamePacket(ENetEvent event)
             UserGuessGamePacket userGuessGP;
             UserGuessGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userGuessGP);
 
-            ENetPeer* activePeer = GetActivePeer();
             if (activePeer != nullptr && event.peer == activePeer)
             {
                 if (CheckIfGameOver(userGuessGP.number))
@@ -255,8 +266,7 @@ void HandleEventTypeReceiveGamePacket(ENetEvent event)
                         ") by " + GetUserNameFromPeer(activePeer) + ".");
 
                     MoveToNextPlayer();
-                    ENetPeer* nowActivePeer = GetActivePeer();
-                    SendTurnToActivePeer(nowActivePeer);
+                    SendTurnToActivePeer();
                 }
 
                 waitingOnPeer = false;
@@ -272,6 +282,8 @@ void HandleEventTypeDisconnect(ENetEvent event)
     cout << "System: A peer has disconnected. Connections: "
         << numberOfActiveConnections << endl;
 
+    string leftPlayerName = GetUserNameFromPeer(event.peer);
+
     auto iterator = peerToNameMap.find(event.peer);
 
     if (iterator != peerToNameMap.end())
@@ -280,7 +292,19 @@ void HandleEventTypeDisconnect(ENetEvent event)
         peerToNameMap.erase(iterator);
     }
 
-    if (numberOfActiveConnections == 0)
+    if (event.peer == activePeer)
+    {
+        cout << "Active peer left.. " << leftPlayerName << endl;
+        MoveToNextPlayer();
+
+        if (activePeer)
+        {
+            cout << "New active peer... " << GetUserNameFromPeer(activePeer) << endl;
+            SendTurnToActivePeer();
+        }
+    }
+
+    if (numberOfActiveConnections == 0 && gameStarted)
     {
         EndGame();
     }
@@ -339,17 +363,6 @@ int main(int argc, char** argv)
             }
             case ENET_EVENT_TYPE_DISCONNECT:
                 HandleEventTypeDisconnect(event);
-
-                ENetPeer* activePeer = GetActivePeer();
-
-                if (activePeer && event.peer == activePeer)
-                {
-                    cout << "Active peer left.. " << GetUserNameFromPeer(activePeer) << endl;
-                    MoveToNextPlayer();
-                    ENetPeer* nowActivePeer = GetActivePeer();
-                    cout << "New active peer... " << GetUserNameFromPeer(nowActivePeer) << endl;
-                    SendTurnToActivePeer(nowActivePeer);
-                }
 
                 /* Reset the peer's client information. */
                 event.peer->data = NULL;

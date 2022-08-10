@@ -15,6 +15,24 @@ ENetPeer* peer;
 string username;
 bool disconnect;
 
+bool acceptingInput = false;
+
+thread inputThread;
+
+int maxNumber;
+
+int acceptingInputStartTime = 0;
+const int timeAllowedForInput = 10;
+
+string messageBuffer = "";
+bool redisplayInput = false;
+
+uint32_t GetTime()
+{
+    using namespace std::chrono;
+    return static_cast<uint32_t>(duration_cast<seconds>(system_clock::now().time_since_epoch()).count());
+}
+
 bool CreateClient()
 {
     cout << "Creating client..." << endl << endl;
@@ -25,6 +43,16 @@ bool CreateClient()
         0 /* assume any amount of outgoing bandwidth */);
 
     return client != NULL;
+}
+
+bool IsNumber(const string& str)
+{
+    for (char const& c : str)
+    {
+        if (isdigit(c) == 0) return false;
+    }
+
+    return true;
 }
 
 void HandleInvalidInput()
@@ -109,6 +137,82 @@ void SendUserGuessGamePacket(int number)
     enet_host_flush(client);
 }
 
+void ClearInputLine()
+{
+    // clear whatever user has input from the display
+    for (int i = 0; i < messageBuffer.length(); i++)
+    {
+        cout << '\b';
+        cout << ' ';
+        cout << '\b';
+    }
+}
+
+void ProcessInput()
+{
+    while (!disconnect)
+    {
+        if (redisplayInput)
+        {
+            cout << messageBuffer;
+            redisplayInput = false;
+        }
+
+        if (acceptingInput)
+        {
+            int input = -1;
+
+            if (_kbhit())
+            {
+                input = _getch();
+
+                char charInput = (char)input;
+                if (charInput == '\r')
+                {
+                    if (messageBuffer.length() > 0)
+                    {
+                        cout << endl;
+
+                        if (messageBuffer == "quit")
+                        {
+                            disconnect = true;
+                        }
+                        else
+                        {
+                            if (IsNumber(messageBuffer))
+                            {
+                                int guess = stoi(messageBuffer);
+                                SendUserGuessGamePacket(guess);
+
+                                ClearInputLine();
+                                messageBuffer = "";
+
+                                acceptingInput = false;
+                            }
+                            else
+                            {
+                                cout << "System: Fix your input." << endl;
+                                ClearInputLine();
+                                messageBuffer = "";
+                            }
+                        }
+                    }
+                }
+                else if (charInput == '\b')
+                {
+                    messageBuffer = messageBuffer.substr(0, messageBuffer.length() - 1);
+                    cout << "\b \b";
+                }
+                else
+                {
+                    cout << charInput;
+                    messageBuffer += charInput;
+                }
+            }
+        }
+    }
+}
+
 void HandleEventTypeReceiveGamePacket(ENetEvent event)
 {
     GamePacket* gamePacket = (GamePacket*)event.packet->data;
@@ -117,23 +221,33 @@ void HandleEventTypeReceiveGamePacket(ENetEvent event)
     {
         if (gamePacket->type == PHT_Message)
         {
+            if (acceptingInput)
+            {
+                ClearInputLine();
+            }
+
             MessageGamePacket messageGP;
             MessageGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, messageGP);
 
             cout << messageGP.message << endl;
+
+            if (acceptingInput)
+            {
+                redisplayInput = true;
+            }
         }
         else if (gamePacket->type == PHT_UserGuess)
         {
             UserGuessGamePacket userGuessGP;
             UserGuessGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userGuessGP);
 
+            FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
+
             cout << "Please enter your guess." << endl;
 
-            int guess = GetValidInput(userGuessGP.number);
+            maxNumber = userGuessGP.number;
 
-            cout << "Sending your guess." << endl;
-
-            SendUserGuessGamePacket(guess);
+            acceptingInput = true;
         }
     }
 }
@@ -210,6 +324,8 @@ int main(int argc, char** argv)
     {
         cout << "Connected to the game." << endl;
 
+        inputThread = thread(ProcessInput);
+
         SendUserInfoGamePacket();
     }
     else
@@ -242,6 +358,7 @@ int main(int argc, char** argv)
     }
 
     LeaveGame();
+    inputThread.join();
 
     if (client != NULL) enet_host_destroy(client);
 
