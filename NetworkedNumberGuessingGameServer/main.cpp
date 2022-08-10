@@ -173,7 +173,9 @@ void BeginGame()
 
     cout << "Number to guess: " << numberToGuess << endl;
 
-    BroadcastMessage("System Message: Starting new game. (" + to_string(GetNumberOfConnections()) + " / " + to_string(requiredNumberOfPlayersToBegin) + ")");
+    BroadcastMessage("System Message: Starting new game. (" 
+        + to_string(GetNumberOfConnections()) + " / " + to_string(requiredNumberOfPlayersToBegin) 
+        + ")\nMinimum guess: 0, Maximum: " + to_string(maxNumber));
 
     MoveToNextPlayer();
 

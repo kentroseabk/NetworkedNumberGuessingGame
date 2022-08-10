@@ -27,6 +27,8 @@ const int timeAllowedForInput = 10;
 string messageBuffer = "";
 bool redisplayInput = false;
 
+string inputPrompt = "Please enter your guess: ";
+
 uint32_t GetTime()
 {
     using namespace std::chrono;
@@ -140,7 +142,7 @@ void SendUserGuessGamePacket(int number)
 void ClearInputLine()
 {
     // clear whatever user has input from the display
-    for (int i = 0; i < messageBuffer.length(); i++)
+    for (int i = 0; i < inputPrompt.length() + messageBuffer.length(); i++)
     {
         cout << '\b';
         cout << ' ';
@@ -154,7 +156,7 @@ void ProcessInput()
     {
         if (redisplayInput)
         {
-            cout << messageBuffer;
+            cout << inputPrompt + messageBuffer;
             redisplayInput = false;
         }
 
@@ -194,6 +196,7 @@ void ProcessInput()
                                 cout << "System: Fix your input." << endl;
                                 ClearInputLine();
                                 messageBuffer = "";
+                                redisplayInput = true;
                             }
                         }
                     }
@@ -243,7 +246,7 @@ void HandleEventTypeReceiveGamePacket(ENetEvent event)
 
             FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
 
-            cout << "Please enter your guess." << endl;
+            cout << inputPrompt;
 
             maxNumber = userGuessGP.number;
 
