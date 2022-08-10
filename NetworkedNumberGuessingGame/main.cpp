@@ -64,31 +64,6 @@ void HandleInvalidInput()
     cin.ignore(numeric_limits<streamsize>::max(), '\n');
 }
 
-int GetValidInput(int max)
-{
-    int selection;
-
-    bool retry;
-
-    do
-    {
-        retry = false;
-
-        cin >> selection;
-
-        if (cin.fail() || selection < 1 || selection > max)
-        {
-            HandleInvalidInput();
-
-            retry = true;
-        }
-    } while (retry);
-
-    cout << endl;
-
-    return selection;
-}
-
 void SendUserInfoGamePacket()
 {
     UserInfoGamePacket userInfoGP;
