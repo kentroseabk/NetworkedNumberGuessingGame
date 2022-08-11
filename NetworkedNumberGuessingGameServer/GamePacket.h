@@ -4,6 +4,12 @@
 
 using namespace std;
 
+/*
+    This file is for various GamePackets the program will be sending and receiving between server and clients.
+    I'm sure there's a way to refactor a lot of the string serialization since it happens in multiple locations,
+    but for a first time serialization implementation I wasn't too worried about that.
+*/
+
 enum PacketHeaderType
 {
     PHT_Invalid,
@@ -95,7 +101,6 @@ struct MessageGamePacket : GamePacket
         type = PHT_Message;
     }
 
-    // player joined, player left, along w/ current number of players
     string message = "";
 
     size_t size() const
@@ -156,9 +161,9 @@ struct UserGuessGamePacket : GamePacket
 
         size_t bufferIdx = GamePacket::serialize(aUserGuessGamePacket, data);
 
-        // serialize guess
-        size_t guessSize = sizeof(number);
-        memcpy(&data[bufferIdx], &aUserGuessGamePacket.number, guessSize);
+        // serialize number
+        size_t numberSize = sizeof(number);
+        memcpy(&data[bufferIdx], &aUserGuessGamePacket.number, numberSize);
     }
 
     static void deserialize(char* data, size_t dataLength, UserGuessGamePacket& aUserGuessGamePacket)

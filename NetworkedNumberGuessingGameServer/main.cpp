@@ -25,9 +25,14 @@ bool waitingOnPeer = false;
 
 int timeToWaitForNextGame = 5000;
 
+void WriteLocalMessage(string message)
+{
+    cout << "System: " << message << endl;
+}
+
 bool CreateServer()
 {
-    cout << "Creating server..." << endl;
+    WriteLocalMessage("Creating server...");
 
     /* Bind the server to the default localhost.     */
     /* A specific host address can be specified by   */
@@ -44,6 +49,7 @@ bool CreateServer()
     return server != NULL;
 }
 
+// Returns a count based on the number of peers in a CONNECTED state.
 int GetNumberOfConnections()
 {
     int total = 0;
@@ -57,6 +63,7 @@ int GetNumberOfConnections()
     return total;
 }
 
+// Returns a username saved for a given connected peer.
 string GetUserNameFromPeer(ENetPeer* peer)
 {
     auto iterator = peerToNameMap.find(peer);
@@ -69,6 +76,7 @@ string GetUserNameFromPeer(ENetPeer* peer)
     return nullptr;
 }
 
+// Send a message to all connected peers.
 void BroadcastMessage(string message)
 {
     MessageGamePacket messageGP;
@@ -101,11 +109,9 @@ int GetRandomNumber(int max)
     return rand() % max + 1;
 }
 
-void SendTurnToActivePeer()
+// Sends a packet to the active peer and requests input.
+void SendInputPromptToActivePeer()
 {
-    // broadcast getting input from certain player
-    BroadcastMessage("System Message: It is now " + GetUserNameFromPeer(activePeer) + "'s turn.");
-
     waitingOnPeer = true;
 
     // send to player it's their turn
@@ -130,13 +136,21 @@ void SendTurnToActivePeer()
     enet_host_flush(server);
 }
 
-ENetPeer* GetNextPeer(ENetPeer* activePeer = nullptr)
+void SendTurnToActivePeer()
+{
+    BroadcastMessage("System Message: It is now " + GetUserNameFromPeer(activePeer) + "'s turn.");
+    SendInputPromptToActivePeer();
+}
+
+// Given the active peer, get the next peer in "line" for a turn.
+ENetPeer* GetNextPeer()
 {
     if (peerToNameMap.size() == 0)
     {
         return nullptr;
     }
     
+    // no currently set active peer? return first in the map
     if (!activePeer)
     {
         return peerToNameMap.begin()->first;
@@ -148,6 +162,7 @@ ENetPeer* GetNextPeer(ENetPeer* activePeer = nullptr)
 
     for (it = peerToNameMap.begin(); it != peerToNameMap.end(); it++)
     {
+        // if we've passed the active peer, return the next immediate peer
         if (passedActivePeer)
         {
             return it->first;
@@ -159,31 +174,35 @@ ENetPeer* GetNextPeer(ENetPeer* activePeer = nullptr)
         }
     }
 
+    // no other peers after the active one, return first peer in map
     return peerToNameMap.begin()->first;
 }
 
-void MoveToNextPlayer()
+void AssignNextPeer()
 {
-    activePeer = GetNextPeer(activePeer);
+    activePeer = GetNextPeer();
 }
 
 void BeginGame()
 {
+    WriteLocalMessage("Beginning game.");
+
     numberToGuess = GetRandomNumber(maxNumber);
 
-    cout << "Number to guess: " << numberToGuess << endl;
+    WriteLocalMessage("Number to guess: " + to_string(numberToGuess));
 
     BroadcastMessage("System Message: Starting new game. (" 
         + to_string(GetNumberOfConnections()) + " / " + to_string(requiredNumberOfPlayersToBegin) 
         + ")\nMinimum guess: 0, Maximum: " + to_string(maxNumber));
 
-    MoveToNextPlayer();
+    AssignNextPeer();
 
     SendTurnToActivePeer();
 
     gameStarted = true;
 }
 
+// Returns current time from epoch in seconds.
 uint32_t GetTime()
 {
     using namespace std::chrono;
@@ -204,9 +223,11 @@ void CheckIfCanStartGame(int numberOfConnections)
     }
 }
 
+// Reset variables. Start new game after x seconds if possible.
 void EndGame()
 {
-    cout << "Game is over.";
+    WriteLocalMessage("Game is over.");
+
     gameStarted = false;
     activePeer = nullptr;
     numberToGuess = 0;
@@ -217,9 +238,57 @@ void EndGame()
     CheckIfCanStartGame(GetNumberOfConnections());
 }
 
-bool CheckIfGameOver(int guess)
+bool IsCorrectGuess(int guess)
 {
     return guess == numberToGuess;
+}
+
+void HandleReceiveUserInfoGamePacket(ENetEvent event)
+{
+    UserInfoGamePacket userInfoGP;
+    UserInfoGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userInfoGP);
+
+    // save user and connectID
+    auto iterator = peerToNameMap.find(event.peer);
+
+    if (iterator == peerToNameMap.end())
+    {
+        peerToNameMap.insert(pair<ENetPeer*, string>(event.peer, userInfoGP.username));
+
+        BroadcastMessage("System Message: " + userInfoGP.username + " has joined the game.");
+    }
+
+    if (!gameStarted)
+    {
+        CheckIfCanStartGame(GetNumberOfConnections());
+    }
+}
+
+void HandleReceiveUserGuessGamePacket(ENetEvent event)
+{
+    UserGuessGamePacket userGuessGP;
+    UserGuessGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userGuessGP);
+
+    if (activePeer != nullptr && event.peer == activePeer)
+    {
+        if (IsCorrectGuess(userGuessGP.number))
+        {
+            BroadcastMessage("System Message: Correct number guessed (" + to_string(userGuessGP.number) +
+                ") by " + GetUserNameFromPeer(activePeer) + ". They are the winner!");
+
+            EndGame();
+        }
+        else
+        {
+            BroadcastMessage("System Message: Incorrect number guessed (" + to_string(userGuessGP.number) +
+                ") by " + GetUserNameFromPeer(activePeer) + ".");
+
+            AssignNextPeer();
+            SendTurnToActivePeer();
+        }
+
+        waitingOnPeer = false;
+    }
 }
 
 void HandleEventTypeReceiveGamePacket(ENetEvent event)
@@ -230,49 +299,27 @@ void HandleEventTypeReceiveGamePacket(ENetEvent event)
     {
         if (gamePacket->type == PHT_UserInfo)
         {
-            UserInfoGamePacket userInfoGP;
-            UserInfoGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userInfoGP);
-
-            // save user and connectID
-            auto iterator = peerToNameMap.find(event.peer);
-
-            if (iterator == peerToNameMap.end())
-            {
-                peerToNameMap.insert(pair<ENetPeer*, string>(event.peer, userInfoGP.username));
-
-                BroadcastMessage("System Message: " + userInfoGP.username + " has joined the game.");
-            }
-
-            if (!gameStarted)
-            {
-                CheckIfCanStartGame(GetNumberOfConnections());
-            }
+            HandleReceiveUserInfoGamePacket(event);
         }
         else if (gamePacket->type == PHT_UserGuess)
         {
-            UserGuessGamePacket userGuessGP;
-            UserGuessGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userGuessGP);
+            HandleReceiveUserGuessGamePacket(event);
+        }
+    }
+}
 
-            if (activePeer != nullptr && event.peer == activePeer)
-            {
-                if (CheckIfGameOver(userGuessGP.number))
-                {
-                    BroadcastMessage("System Message: Correct number guessed (" + to_string(userGuessGP.number) + 
-                        ") by " + GetUserNameFromPeer(activePeer) + ". They are the winner!");
+void CheckIfActivePeerDisconnect(ENetEvent event, string leftPlayerName)
+{
+    if (event.peer == activePeer)
+    {
+        WriteLocalMessage("Active peer (" + leftPlayerName + ") has left.");
+        
+        AssignNextPeer();
 
-                    EndGame();
-                }
-                else
-                {
-                    BroadcastMessage("System Message: Incorrect number guessed (" + to_string(userGuessGP.number) +
-                        ") by " + GetUserNameFromPeer(activePeer) + ".");
-
-                    MoveToNextPlayer();
-                    SendTurnToActivePeer();
-                }
-
-                waitingOnPeer = false;
-            }
+        if (activePeer)
+        {
+            WriteLocalMessage("New active peer (" + GetUserNameFromPeer(activePeer) + ")");
+            SendTurnToActivePeer();
         }
     }
 }
@@ -281,8 +328,7 @@ void HandleEventTypeDisconnect(ENetEvent event)
 {
     int numberOfActiveConnections = GetNumberOfConnections();
 
-    cout << "System: A peer has disconnected. Connections: "
-        << numberOfActiveConnections << endl;
+    WriteLocalMessage("A peer has disconnected. Connections: " + to_string(numberOfActiveConnections));
 
     string leftPlayerName = GetUserNameFromPeer(event.peer);
 
@@ -293,18 +339,8 @@ void HandleEventTypeDisconnect(ENetEvent event)
         BroadcastMessage("System Message: " + GetUserNameFromPeer(event.peer) + " has left the game.");
         peerToNameMap.erase(iterator);
     }
-
-    if (event.peer == activePeer)
-    {
-        cout << "Active peer left.. " << leftPlayerName << endl;
-        MoveToNextPlayer();
-
-        if (activePeer)
-        {
-            cout << "New active peer... " << GetUserNameFromPeer(activePeer) << endl;
-            SendTurnToActivePeer();
-        }
-    }
+    
+    CheckIfActivePeerDisconnect(event, leftPlayerName);
 
     if (numberOfActiveConnections == 0 && gameStarted)
     {
@@ -320,7 +356,8 @@ int main(int argc, char** argv)
     if (enet_initialize() != 0)
     {
         fprintf(stderr, "An error occurred while initializing ENet.\n");
-        cout << "An error occurred while initializing ENet." << endl;
+        WriteLocalMessage("An error occurred while initializing ENet.");
+      
         return EXIT_FAILURE;
     }
 
@@ -330,11 +367,11 @@ int main(int argc, char** argv)
     {
         fprintf(stderr,
             "An error occurred while trying to create an ENet server host.\n");
-        cout << "An error occurred while trying to create an ENet server host." << endl;
+        WriteLocalMessage("An error occurred while trying to create an ENet server host.");
         ::exit(EXIT_FAILURE);
     }
 
-    cout << "Server created..." << endl;
+    WriteLocalMessage("Server created. Waiting for connections.");
 
     while (true)
     {
@@ -349,8 +386,7 @@ int main(int argc, char** argv)
             {
                 int numberOfConnections = GetNumberOfConnections();
 
-                cout << "System: A new peer has connected. Connections: "
-                    << numberOfConnections << endl;
+                WriteLocalMessage("A new peer has connected. Connections: " + to_string(numberOfConnections));
 
                 break;
             }
