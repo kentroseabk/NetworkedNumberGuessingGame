@@ -47,7 +47,7 @@ bool CreateClient()
     return client != NULL;
 }
 
-bool IsNumber(const string& str)
+bool IsStringANumber(const string& str)
 {
     for (char const& c : str)
     {
@@ -125,15 +125,89 @@ void ClearInputLine()
     }
 }
 
+void CheckIfShouldRedisplayInput()
+{
+    if (redisplayInput)
+    {
+        cout << inputPrompt + messageBuffer;
+        redisplayInput = false;
+    }
+}
+
+void SendUserGuess()
+{
+    int guess = stoi(messageBuffer);
+    SendUserGuessGamePacket(guess);
+
+    ClearInputLine();
+    messageBuffer = "";
+
+    acceptingInput = false;
+}
+
+void AlertOfInvalidInput()
+{
+    cout << "System: Fix your input." << endl;
+    ClearInputLine();
+    messageBuffer = "";
+    redisplayInput = true;
+}
+
+// User has hit the return key.
+void ProcessSubmittedInput()
+{
+    if (messageBuffer.length() > 0)
+    {
+        cout << endl;
+
+        if (messageBuffer == "quit")
+        {
+            disconnect = true;
+        }
+        else
+        {
+            if (IsStringANumber(messageBuffer))
+            {
+                SendUserGuess();
+            }
+            else
+            {
+                AlertOfInvalidInput();
+            }
+        }
+    }
+}
+
+// User has hit the keyboard.
+void ProcessKeyPress(int input)
+{
+    char charInput = (char)input;
+    if (charInput == '\r')
+    {
+        ProcessSubmittedInput();
+    }
+    else if (charInput == '\b')
+    {
+        messageBuffer = messageBuffer.substr(0, messageBuffer.length() - 1);
+        cout << "\b \b";
+    }
+    else
+    {
+        cout << charInput;
+        messageBuffer += charInput;
+    }
+}
+
+/*
+    Process the user's input, but if a message comes in while user is typing,
+    clear their input on the screen, display the new message, and re-display
+    their partially written input.
+*/
 void ProcessInput()
 {
     while (!disconnect)
     {
-        if (redisplayInput)
-        {
-            cout << inputPrompt + messageBuffer;
-            redisplayInput = false;
-        }
+        CheckIfShouldRedisplayInput();
 
         if (acceptingInput)
         {
@@ -142,53 +216,42 @@ void ProcessInput()
             if (_kbhit())
             {
                 input = _getch();
-
-                char charInput = (char)input;
-                if (charInput == '\r')
-                {
-                    if (messageBuffer.length() > 0)
-                    {
-                        cout << endl;
-
-                        if (messageBuffer == "quit")
-                        {
-                            disconnect = true;
-                        }
-                        else
-                        {
-                            if (IsNumber(messageBuffer))
-                            {
-                                int guess = stoi(messageBuffer);
-                                SendUserGuessGamePacket(guess);
-
-                                ClearInputLine();
-                                messageBuffer = "";
-
-                                acceptingInput = false;
-                            }
-                            else
-                            {
-                                cout << "System: Fix your input." << endl;
-                                ClearInputLine();
-                                messageBuffer = "";
-                                redisplayInput = true;
-                            }
-                        }
-                    }
-                }
-                else if (charInput == '\b')
-                {
-                    messageBuffer = messageBuffer.substr(0, messageBuffer.length() - 1);
-                    cout << "\b \b";
-                }
-                else
-                {
-                    cout << charInput;
-                    messageBuffer += charInput;
-                }
+                ProcessKeyPress(input);
             }
         }
     }
+}
+
+void HandleReceiveMessageGamePacket(ENetEvent event)
+{
+    if (acceptingInput)
+    {
+        ClearInputLine();
+    }
+
+    MessageGamePacket messageGP;
+    MessageGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, messageGP);
+
+    cout << messageGP.message << endl;
+
+    if (acceptingInput)
+    {
+        redisplayInput = true;
+    }
+}
+
+void HandleReceiveUserGuessGamePacket(ENetEvent event)
+{
+    UserGuessGamePacket userGuessGP;
+    UserGuessGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userGuessGP);
+
+    FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
+
+    cout << inputPrompt;
+
+    maxNumber = userGuessGP.number;
+
+    acceptingInput = true;
 }
 
 void HandleEventTypeReceiveGamePacket(ENetEvent event)
@@ -199,33 +262,11 @@ void HandleEventTypeReceiveGamePacket(ENetEvent event)
     {
         if (gamePacket->type == PHT_Message)
         {
-            if (acceptingInput)
-            {
-                ClearInputLine();
-            }
-
-            MessageGamePacket messageGP;
-            MessageGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, messageGP);
-
-            cout << messageGP.message << endl;
-
-            if (acceptingInput)
-            {
-                redisplayInput = true;
-            }
+            HandleReceiveMessageGamePacket(event);
         }
         else if (gamePacket->type == PHT_UserGuess)
         {
-            UserGuessGamePacket userGuessGP;
-            UserGuessGamePacket::deserialize((char*)event.packet->data, event.packet->dataLength, userGuessGP);
-
-            FlushConsoleInputBuffer(GetStdHandle(STD_INPUT_HANDLE));
-
-            cout << inputPrompt;
-
-            maxNumber = userGuessGP.number;
-
-            acceptingInput = true;
+            HandleReceiveUserGuessGamePacket(event);
         }
     }
 }
